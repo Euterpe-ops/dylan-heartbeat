@@ -351,26 +351,29 @@ function stripPosition(messages) {
   return messages.map(({ position, ...rest }) => rest);
 }
 
-function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
-  // 优先读取独立的提示词文件（推荐方式）
-  const promptFile = path.join(__dirname, "wake_prompt.txt");
-  if (fs.existsSync(promptFile)) {
-    const template = fs.readFileSync(promptFile, "utf-8");
+function buildWakePrompt(currentTime, diffMinutes, { weatherContext = "", phoneContext = "" } = {}) {
+  const allContext = [weatherContext, phoneContext].filter(Boolean).join("\n\n");
+
+  function applyReplacements(template) {
     return template
       .replace(/\$\{currentTime\}/g, currentTime)
       .replace(/\$\{diffMinutes\}/g, diffMinutes)
       .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
+      .replace(/\$\{weather\}/g, weatherContext)
+      .replace(/\$\{phoneState\}/g, phoneContext)
+      .replace(/\$\{phoneContext\}/g, phoneContext)
+      .replace(/\$\{allContext\}/g, allContext);
+  }
+
+  // 优先读取独立的提示词文件（推荐方式）
+  const promptFile = path.join(__dirname, "wake_prompt.txt");
+  if (fs.existsSync(promptFile)) {
+    return applyReplacements(fs.readFileSync(promptFile, "utf-8"));
   }
 
   // 如果文件不存在，尝试从环境变量读取（兼容旧配置）
   if (process.env.WAKE_PROMPT_TEMPLATE) {
-    return process.env.WAKE_PROMPT_TEMPLATE
-      .replace(/\\n/g, '\n')
-      .replace(/\$\{currentTime\}/g, currentTime)
-      .replace(/\$\{diffMinutes\}/g, diffMinutes)
-      .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
+    return applyReplacements(process.env.WAKE_PROMPT_TEMPLATE.replace(/\\n/g, '\n'));
   }
 
   // 默认理智版本（开源通用），可自行修改提示词
@@ -482,7 +485,7 @@ async function runWakeUp() {
 
   const weatherContext = await fetchWeatherContext();
   const phoneContext = formatPhoneActivityContext(phoneActivity);
-  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext + (phoneContext ? "\n\n" + phoneContext : ""));
+  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, { weatherContext, phoneContext });
 
   // 尝试从时间线读取聊天记录和系统提示词（可选，兼容网关模式）
   const cleanMessages = messages ? stripPosition(messages) : [];
