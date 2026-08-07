@@ -698,7 +698,11 @@ app.post("/v1/chat/completions", async (req, reply) => {
     const response = await fetch(TARGET_API_URL, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        ...Object.fromEntries(
+          Object.entries(req.headers).filter(([k]) => 
+            !['host','content-length','authorization','connection'].includes(k.toLowerCase())
+          )
+        ),
         Authorization: `Bearer ${process.env.TARGET_API_KEY}`
       },
       body: JSON.stringify({ ...body, messages: [...kelivoMessages, ...oldEvents] })
