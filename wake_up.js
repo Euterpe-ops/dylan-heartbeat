@@ -425,16 +425,31 @@ function formatPhoneActivityContext(records) {
   const now = new Date();
   const lines = ["## 用户手机使用记录（最近）"];
 
+  // 按时间正序排列（从早到晚）
+  const sorted_records = [...records].sort((a, b) =>
+    new Date(a.opened_at) - new Date(b.opened_at)
+  );
+
+  // 匹配 open/close：没有 app_name 的 close 匹配前面最近的 open
+  const opens = [];
   const sessions = {};
-  for (const r of records) {
-    const name = r.app_name || "未知";
-    if (!sessions[name]) sessions[name] = { opens: [], closes: [], lastActivity: r.opened_at };
-    if (r.action === "close") {
-      sessions[name].closes.push(new Date(r.opened_at));
+
+  for (const r of sorted_records) {
+    const time = new Date(r.opened_at);
+    if (r.action !== "close") {
+      const name = r.app_name || "未知";
+      opens.push({ name, time });
+      if (!sessions[name]) sessions[name] = { opens: [], closes: [], lastActivity: time };
+      sessions[name].opens.push(time);
+      if (time > sessions[name].lastActivity) sessions[name].lastActivity = time;
     } else {
-      sessions[name].opens.push(new Date(r.opened_at));
+      // close 事件：如果有 app_name 就用，没有就匹配最近的 open
+      const name = (r.app_name && r.app_name !== "EMPTY") ? r.app_name : (opens.length > 0 ? opens[opens.length - 1].name : null);
+      if (!name) continue;
+      if (!sessions[name]) sessions[name] = { opens: [], closes: [], lastActivity: time };
+      sessions[name].closes.push(time);
+      if (time > sessions[name].lastActivity) sessions[name].lastActivity = time;
     }
-    if (r.opened_at > sessions[name].lastActivity) sessions[name].lastActivity = r.opened_at;
   }
 
   const sorted = Object.entries(sessions).sort((a, b) =>
