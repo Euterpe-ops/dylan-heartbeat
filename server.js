@@ -552,6 +552,8 @@ app.get("/v1/models", async (req, reply) => {
 app.post("/v1/chat/completions", async (req, reply) => {
   try {
     const body = req.body;
+    console.log("DEBUG_BODY:", JSON.stringify(Object.keys(body)));
+    console.log("DEBUG_EXTRA:", JSON.stringify({thinking:body.thinking,reasoning:body.reasoning,max_tokens:body.max_tokens,temperature:body.temperature}));
     // 批注 2026-07-15：公开部署时日志不能默认写入完整上下文；
     // 这里只保留请求摘要，避免 system prompt、记忆和聊天正文进入 pm2 日志。
     console.log(JSON.stringify({
