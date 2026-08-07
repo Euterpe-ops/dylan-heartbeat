@@ -425,23 +425,44 @@ function formatPhoneActivityContext(records) {
   const now = new Date();
   const lines = ["## 用户手机使用记录（最近）"];
 
-  const grouped = {};
+  const sessions = {};
   for (const r of records) {
     const name = r.app_name || "未知";
-    if (!grouped[name]) grouped[name] = { count: 0, lastOpened: r.opened_at };
-    grouped[name].count++;
-    if (r.opened_at > grouped[name].lastOpened) grouped[name].lastOpened = r.opened_at;
+    if (!sessions[name]) sessions[name] = { opens: [], closes: [], lastActivity: r.opened_at };
+    if (r.action === "close") {
+      sessions[name].closes.push(new Date(r.opened_at));
+    } else {
+      sessions[name].opens.push(new Date(r.opened_at));
+    }
+    if (r.opened_at > sessions[name].lastActivity) sessions[name].lastActivity = r.opened_at;
   }
 
-  const sorted = Object.entries(grouped).sort((a, b) =>
-    new Date(b[1].lastOpened) - new Date(a[1].lastOpened)
+  const sorted = Object.entries(sessions).sort((a, b) =>
+    new Date(b[1].lastActivity) - new Date(a[1].lastActivity)
   );
 
   for (const [appName, info] of sorted) {
-    const lastTime = new Date(info.lastOpened);
+    const lastTime = new Date(info.lastActivity);
     const diffMin = Math.floor((now - lastTime) / 1000 / 60);
-    const timeStr = diffMin < 1 ? "刚刚" : diffMin < 60 ? `${diffMin}分钟前` : `${Math.floor(diffMin/60)}小时前`;
-    lines.push(`- ${appName}：打开${info.count}次，最近${timeStr}`);
+    const timeStr = diffMin < 1 ? "刚刚" : diffMin < 60 ? `${diffMin}分钟前` : `${Math.floor(diffMin / 60)}小时前`;
+
+    let durationStr = "";
+    if (info.opens.length > 0 && info.closes.length > 0) {
+      let totalMin = 0;
+      for (const closeTime of info.closes) {
+        const matchingOpen = info.opens.filter(o => o < closeTime).sort((a, b) => b - a)[0];
+        if (matchingOpen) {
+          totalMin += Math.floor((closeTime - matchingOpen) / 1000 / 60);
+        }
+      }
+      if (totalMin > 0) durationStr = `，累计约${totalMin}分钟`;
+    }
+
+    const openCount = info.opens.length;
+    const isCurrentlyOpen = info.opens.length > info.closes.length;
+    const status = isCurrentlyOpen ? "（当前在用）" : "";
+
+    lines.push(`- ${appName}：打开${openCount}次${durationStr}，最近${timeStr}${status}`);
   }
 
   const latestRecord = new Date(records[0].opened_at);
