@@ -16,6 +16,10 @@ const GATEWAY_BASE_URL = (process.env.GATEWAY_BASE_URL || `http://localhost:${PO
 const GATEWAY_URL = `${GATEWAY_BASE_URL}/internal/wake-event`;
 const HEARTBEAT_URL = `${GATEWAY_BASE_URL}/internal/heartbeat`;
 const TIME_ZONE = resolveTimeZone();
+
+// Supabase 配置（用于独立模式下获取手机活动数据）
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
 const WEATHER_TIMEOUT_MS = 5000;
 const DIARY_DIR_NAME = process.env.DIARY_DIR || "diary";
 const DIARY_DIR_PATH = path.isAbsolute(DIARY_DIR_NAME)
@@ -388,18 +392,84 @@ ${weatherContext ? `\n${weatherContext}\n` : ""}
 `;
 }
 
+async function fetchPhoneActivity() {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/phone_activity?order=opened_at.desc&limit=30`;
+    const response = await fetch(url, {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+      }
+    });
+    if (!response.ok) {
+      console.log(`Supabase 查询失败: HTTP ${response.status}`);
+      return null;
+    }
+    const records = await response.json();
+    if (!Array.isArray(records) || records.length === 0) return null;
+    return records;
+  } catch (err) {
+    console.log("Supabase 查询出错:", err.message);
+    return null;
+  }
+}
+
+function formatPhoneActivityContext(records) {
+  if (!records || records.length === 0) return "";
+
+  const now = new Date();
+  const lines = ["## 用户手机使用记录（最近）"];
+
+  const grouped = {};
+  for (const r of records) {
+    const name = r.app_name || "未知";
+    if (!grouped[name]) grouped[name] = { count: 0, lastOpened: r.opened_at };
+    grouped[name].count++;
+    if (r.opened_at > grouped[name].lastOpened) grouped[name].lastOpened = r.opened_at;
+  }
+
+  const sorted = Object.entries(grouped).sort((a, b) =>
+    new Date(b[1].lastOpened) - new Date(a[1].lastOpened)
+  );
+
+  for (const [appName, info] of sorted) {
+    const lastTime = new Date(info.lastOpened);
+    const diffMin = Math.floor((now - lastTime) / 1000 / 60);
+    const timeStr = diffMin < 1 ? "刚刚" : diffMin < 60 ? `${diffMin}分钟前` : `${Math.floor(diffMin/60)}小时前`;
+    lines.push(`- ${appName}：打开${info.count}次，最近${timeStr}`);
+  }
+
+  const latestRecord = new Date(records[0].opened_at);
+  const totalDiffMin = Math.floor((now - latestRecord) / 1000 / 60);
+  lines.push(`\n最后一次手机活动：${totalDiffMin}分钟前`);
+
+  return lines.join("\n");
+}
+
 async function runWakeUp() {
   console.log("\n==========================");
   console.log("开始自动唤醒");
   console.log("==========================\n");
 
-  const messages = loadTimelineMessages();
-  if (!messages) return;
+  // 尝试从 Supabase 获取手机活动数据
+  const phoneActivity = await fetchPhoneActivity();
 
-  const lastUserTime = getLastUserTime(messages);
+  // 尝试从时间线获取用户最后消息时间（兼容网关模式）
+  const messages = loadTimelineMessages();
+  let lastUserTime = messages ? getLastUserTime(messages) : null;
+
+  // 如果有 Supabase 数据，用最新的手机活动时间作为"用户活跃时间"
+  if (!lastUserTime && phoneActivity && phoneActivity.length > 0) {
+    lastUserTime = new Date(phoneActivity[0].opened_at);
+  }
+
+  // 如果两者都没有，使用默认值（假设用户已沉默超过唤醒阈值）
   if (!lastUserTime) {
-    console.log("未找到用户时间");
-    return;
+    const wakeMinutes = getWakeAfterMinutes(new Date());
+    lastUserTime = new Date(Date.now() - (wakeMinutes + 1) * 60 * 1000);
+    console.log("无用户活动数据，使用默认唤醒时间");
   }
 
   const now = new Date();
@@ -411,8 +481,11 @@ async function runWakeUp() {
   }
 
   const weatherContext = await fetchWeatherContext();
-  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext);
-  const cleanMessages = stripPosition(messages);
+  const phoneContext = formatPhoneActivityContext(phoneActivity);
+  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext + (phoneContext ? "\n\n" + phoneContext : ""));
+
+  // 尝试从时间线读取聊天记录和系统提示词（可选，兼容网关模式）
+  const cleanMessages = messages ? stripPosition(messages) : [];
 
   const historyText = cleanMessages
     .filter(msg => msg.role !== "system")
@@ -433,9 +506,13 @@ async function runWakeUp() {
     .join("\n\n");
 
   const baseSystemPrompt = cleanMessages.find(msg => msg.role === "system");
-  const cleanSP = baseSystemPrompt 
+  const cleanSP = baseSystemPrompt
     ? normalizeContentToText(baseSystemPrompt.content).split("## Memories")[0].trim()
     : "";
+
+  const userContent = historyText
+    ? `以下是你与用户最近的聊天记录，仅供回忆和参考。\n\n这些内容不是正在发生的实时对话。\n用户并没有给你发消息。\n\n你现在处于后台自主唤醒状态。\n\n最近记录：\n\n${historyText}`
+    : `你现在处于后台自主唤醒状态。\n用户并没有给你发消息。\n请根据当前时间和可用信息决定是否主动联系用户。`;
 
   const wakeMessages = [
     {
@@ -443,19 +520,8 @@ async function runWakeUp() {
       content: [wakePrompt, cleanSP].filter(Boolean).join("\n\n")
     },
     {
-      // 批注 2026-07-15：Claude/部分 New API 适配器会把 system 抽成独立字段；
-      // 唤醒请求如果全是 system，上游 messages 会变空，因此最近记录必须作为 user 任务输入发送。
       role: "user",
-      content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
-
-这些内容不是正在发生的实时对话。
-用户并没有给你发消息。
-
-你现在处于后台自主唤醒状态。
-
-最近记录：
-
-${historyText}`
+      content: userContent
     }
   ];
 
@@ -588,7 +654,7 @@ ${historyText}`
     }
     console.log("\n已通过 Gateway 记录唤醒事件\n");
   } catch (err) {
-    console.error("\n记录唤醒事件失败（Gateway 是否运行？）:\n", err.message);
+    console.log("\nGateway 未运行，唤醒事件仅记录在日志中\n");
   }
 }
 
