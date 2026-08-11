@@ -589,6 +589,7 @@ async function runWakeUp() {
     body: JSON.stringify({
       model: process.env.MODEL_NAME,
       messages: wakeMessages,
+      max_tokens: 2048,
       temperature: 0.8,
       top_p: 0.95,
       stream: false
