@@ -276,6 +276,104 @@ function extractTimestampWithMemory(msg, tsDB) {
 }
 
 // ========================
+// Supabase 手机活动查询（用于聊天摘要注入）
+// ========================
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
+
+async function fetchRecentPhoneActivity(sinceTime) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return [];
+  try {
+    const since = sinceTime ? new Date(sinceTime).toISOString() : new Date(Date.now() - 3600000).toISOString();
+    const url = `${SUPABASE_URL}/rest/v1/phone_activity?opened_at=gte.${since}&order=opened_at.desc&limit=30`;
+    const response = await fetch(url, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
+    });
+    if (!response.ok) return [];
+    const records = await response.json();
+    return Array.isArray(records) ? records : [];
+  } catch { return []; }
+}
+
+// ========================
+// 一句话摘要生成（方案C：回来时注入一次）
+// ========================
+let lastSummaryInjectedAt = 0;
+const INJECT_COOLDOWN_MS = 30 * 60 * 1000; // 30分钟冷却
+
+function summarizeEventsOneLine(events, phoneActivity, lastUserTime) {
+  const parts = [];
+
+  // 推送摘要：只取用户离开后的事件
+  const newEvents = lastUserTime
+    ? events.filter(e => {
+        const c = normalizeContentToText(e.content);
+        const m = c.match(/(\d{4})-(\d{2})-(\d{2})\s?(\d{2})[：:](\d{2})/);
+        if (!m) return false;
+        const eventTime = zonedWallTimeToDate(
+          { year: m[1], month: m[2], day: m[3], hour: m[4], minute: m[5] },
+          resolveTimeZone()
+        );
+        return eventTime > lastUserTime;
+      })
+    : events;
+
+  if (newEvents.length > 0) {
+    const pushed = newEvents.filter(e => {
+      const c = normalizeContentToText(e.content);
+      return c.includes("发了") && c.includes("推送");
+    });
+    if (pushed.length > 0) {
+      const texts = pushed.slice(-3).map(e => {
+        const c = normalizeContentToText(e.content);
+        const match = c.match(/推送[：:](.+?)）/);
+        if (match) {
+          const p = match[1].split("｜");
+          return p.length > 1 ? p.slice(1).join("｜") : p[0];
+        }
+        return "";
+      }).filter(Boolean);
+      parts.push(`发了${pushed.length}条推送` + (texts.length ? `（「${texts.join("」「")}」）` : ""));
+    } else {
+      parts.push(`唤醒${newEvents.length}次均未推送`);
+    }
+  }
+
+  // 手机活动摘要：方案2（带时长）
+  if (phoneActivity && phoneActivity.length > 0) {
+    const appSessions = {};
+    for (const r of phoneActivity) {
+      const name = r.app_name && r.app_name !== "EMPTY" ? r.app_name : null;
+      if (!name) continue;
+      if (!appSessions[name]) appSessions[name] = { firstSeen: r.opened_at, lastSeen: r.opened_at, count: 0 };
+      appSessions[name].count++;
+      if (new Date(r.opened_at) < new Date(appSessions[name].firstSeen)) appSessions[name].firstSeen = r.opened_at;
+      if (new Date(r.opened_at) > new Date(appSessions[name].lastSeen)) appSessions[name].lastSeen = r.opened_at;
+    }
+
+    const sorted = Object.entries(appSessions)
+      .sort((a, b) => b[1].count - a[1].count)
+      .slice(0, 4);
+
+    if (sorted.length > 0) {
+      const tz = resolveTimeZone();
+      const appTexts = sorted.map(([name, info]) => {
+        const time = formatDateTimeInTimeZone(new Date(info.firstSeen), tz).slice(-5);
+        const durationMin = Math.max(1, Math.round((new Date(info.lastSeen) - new Date(info.firstSeen)) / 60000));
+        return `${time} ${name} ${durationMin}min`;
+      });
+      const lastActive = phoneActivity[0];
+      const lastMin = Math.floor((Date.now() - new Date(lastActive.opened_at)) / 60000);
+      const lastStr = lastMin < 1 ? "刚刚" : `${lastMin}分钟前`;
+      parts.push(`手机：${appTexts.join("，")}，最后活跃${lastStr}`);
+    }
+  }
+
+  if (parts.length === 0) return "";
+  return `[你离开后：${parts.join("；")}]`;
+}
+
+// ========================
 // 消息判断
 // ========================
 function isSpecialEvent(msg) {
@@ -587,30 +685,34 @@ app.post("/v1/chat/completions", async (req, reply) => {
       .map(prepareMessageForLLM)
       .filter(Boolean);
 
-    const oldEvents = stripPosition(
-      oldTimeline.filter(isSpecialEvent).sort((a, b) => {
-        const timeA = extractTimestampWithMemory(a, tsDB);
-        const timeB = extractTimestampWithMemory(b, tsDB);
-        if (timeA && timeB) return timeA - timeB;
-        return 0;
-      })
-    );
+    // 方案C：只在"回来"时注入一次摘要（冷却30分钟 + 有新内容）
+    const oldEvents = oldTimeline.filter(isSpecialEvent);
+    const now = Date.now();
+    const shouldInjectSummary = (now - lastSummaryInjectedAt) > INJECT_COOLDOWN_MS;
 
-    console.log("本次注入的特殊事件数量:", oldEvents.length);
-
-    for (const event of oldEvents) {
-      const eventTime = extractTimestampWithMemory(event, tsDB);
-      if (!eventTime) { llmMessages.push(event); continue; }
-      let inserted = false;
-      for (let i = 0; i < llmMessages.length; i++) {
-        const msgTime = extractTimestampWithMemory(llmMessages[i], tsDB);
-        if (msgTime && msgTime >= eventTime) {
-          llmMessages.splice(i, 0, event);
-          inserted = true;
-          break;
+    if (shouldInjectSummary && oldEvents.length > 0) {
+      const lastUserTime = (() => {
+        for (let i = kelivoMessages.length - 1; i >= 0; i--) {
+          if (kelivoMessages[i].role === "user") {
+            const ts = extractTimestamp(normalizeContentToText(kelivoMessages[i].content));
+            if (ts) return ts;
+          }
         }
+        return null;
+      })();
+
+      const phoneActivity = await fetchRecentPhoneActivity(lastUserTime);
+      const eventSummary = summarizeEventsOneLine(oldEvents, phoneActivity, lastUserTime);
+
+      if (eventSummary) {
+        const sysIdx = llmMessages.findIndex(m => m.role === "system");
+        if (sysIdx !== -1) {
+          const sysContent = normalizeContentToText(llmMessages[sysIdx].content);
+          llmMessages[sysIdx] = { ...llmMessages[sysIdx], content: sysContent + "\n\n" + eventSummary };
+        }
+        lastSummaryInjectedAt = now;
+        console.log("注入摘要:", eventSummary);
       }
-      if (!inserted) llmMessages.push(event);
     }
 
 
