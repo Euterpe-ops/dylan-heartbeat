@@ -619,8 +619,8 @@ async function runWakeUp() {
   } else if (aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/)) {
     const noActionMatch = aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/);
     // AI 选择不发送推送
-    console.log("\nAI 选择不发送推送\n");
     let reason = (noActionMatch[1] || "").trim();
+    console.log(`\nAI 选择不发送推送｜原因：${reason || "未说明"}\n`);
     if (reason.startsWith("原因：") || reason.startsWith("原因:")) {
       reason = reason.replace(/^原因[：:]\s*/, "").trim();
     }
