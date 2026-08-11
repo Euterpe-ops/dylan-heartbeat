@@ -798,12 +798,12 @@ app.post("/v1/chat/completions", async (req, reply) => {
     const { messages: _m, ...bodyParams } = body;
     console.log(JSON.stringify({ event: "llm_forward_params", params: Object.keys(bodyParams), model: bodyParams.model, max_tokens: bodyParams.max_tokens, thinking: bodyParams.thinking, reasoning: bodyParams.reasoning }));
 
-    // 如果 Kelivo 传的 thinking.budget_tokens 无效（如 -1），直接移除 thinking 让上游按默认处理
+    // 如果 Kelivo 传的 thinking.budget_tokens 无效（如 -1），改为 adaptive 模式
     const modelStr = (body.model || "").toLowerCase();
     const isAnthropicModel = modelStr.includes("anthropic") || modelStr.includes("claude");
     let forwardBody = { ...body, messages: llmMessages };
     if (isAnthropicModel && forwardBody.thinking && forwardBody.thinking.budget_tokens < 1024) {
-      delete forwardBody.thinking;
+      forwardBody.thinking = { type: "adaptive" };
     }
 
     // 请求模型
