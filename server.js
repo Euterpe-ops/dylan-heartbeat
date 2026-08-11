@@ -794,18 +794,31 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
     const requestedStream = body?.stream === true;
 
+    // 转发参数诊断（不含 messages 和 system prompt 内容）
+    const { messages: _m, ...bodyParams } = body;
+    console.log(JSON.stringify({ event: "llm_forward_params", params: Object.keys(bodyParams), model: bodyParams.model, max_tokens: bodyParams.max_tokens, thinking: bodyParams.thinking, reasoning: bodyParams.reasoning }));
+
+    // 如果 Kelivo 没传 thinking 参数，为 Anthropic 模型补上默认值
+    const modelStr = (body.model || "").toLowerCase();
+    const isAnthropicModel = modelStr.includes("anthropic") || modelStr.includes("claude");
+    const hasThinkingParams = body.thinking || body.reasoning || body.reasoning_effort;
+    const thinkingDefaults = (isAnthropicModel && !hasThinkingParams)
+      ? { thinking: { type: "enabled", budget_tokens: 10000 } }
+      : {};
+
     // 请求模型
     const response = await fetch(TARGET_API_URL, {
       method: "POST",
       headers: {
         ...Object.fromEntries(
-          Object.entries(req.headers).filter(([k]) => 
+          Object.entries(req.headers).filter(([k]) =>
             !['host','content-length','authorization','connection'].includes(k.toLowerCase())
           )
         ),
+        "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.TARGET_API_KEY}`
       },
-      body: JSON.stringify({ ...body, messages: [...kelivoMessages, ...oldEvents] })
+      body: JSON.stringify({ ...body, ...thinkingDefaults, messages: llmMessages })
     });
 
     const upstreamContentType = response.headers.get("content-type") || "";
