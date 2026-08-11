@@ -720,6 +720,12 @@ function readRestartCommand() {
 // ========================
 app.addHook("onRequest", (req, reply, done) => {
   if (req.url.startsWith("/admin")) return done();
+  if (req.url.startsWith("/mcp")) {
+    const auth = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+    if (auth === readEnvValue("GATEWAY_API_KEY")) return done();
+    reply.code(401).send({ error: "MCP auth required" });
+    return;
+  }
   // 批注 2026-07-15：公网部署常经过反代，真实公网请求可能在 Node 侧显示为 127/10 网段；
   // 所以 ALLOW_PUBLIC_API=true 后必须先验 /v1 的网关 key，避免被云平台内网 IP 绕过。
   if (readBooleanEnv("ALLOW_PUBLIC_API", false) && req.url.startsWith("/v1/")) {
