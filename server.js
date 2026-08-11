@@ -278,8 +278,122 @@ function extractTimestampWithMemory(msg, tsDB) {
 // ========================
 // Supabase 手机活动查询（用于聊天摘要注入）
 // ========================
-const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
+// MCP Server (Streamable HTTP transport)
+// ========================
+const MCP_TOOLS = [
+  {
+    name: "get_push_history",
+    description: "获取最近的自动推送记录（包括发送和未发送的唤醒事件）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "返回条数，默认10", default: 10 }
+      }
+    }
+  },
+  {
+    name: "get_phone_activity",
+    description: "获取用户最近的手机app使用情况（来自iOS快捷指令自动记录）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        hours: { type: "number", description: "查最近几小时，默认2", default: 2 }
+      }
+    }
+  }
+];
+
+function handleMcpToolCall(name, args) {
+  if (name === "get_push_history") {
+    const limit = (args && args.limit) || 10;
+    const timeline = loadTimeline();
+    const events = timeline.filter(isSpecialEvent).slice(-limit);
+    if (events.length === 0) return "最近没有推送记录。";
+    const tz = resolveTimeZone();
+    const lines = events.map(e => {
+      const c = normalizeContentToText(e.content);
+      const timeMatch = c.match(/(\d{4})-(\d{2})-(\d{2})\s?(\d{2})[：:](\d{2})/);
+      const timeStr = timeMatch ? `${timeMatch[1]}-${timeMatch[2]}-${timeMatch[3]} ${timeMatch[4]}:${timeMatch[5]}` : "未知时间";
+      const pushed = c.includes("发了") && c.includes("推送");
+      const contentMatch = c.match(/推送[：:](.+?)）/);
+      const brief = contentMatch ? contentMatch[1].split("｜").slice(-1)[0] : "";
+      return pushed ? `${timeStr} ✓ 推送：${brief}` : `${timeStr} ✗ 未推送`;
+    });
+    return lines.join("\n");
+  }
+
+  if (name === "get_phone_activity") {
+    const hours = (args && args.hours) || 2;
+    const since = new Date(Date.now() - hours * 3600000).toISOString();
+    return fetchRecentPhoneActivity(since).then(records => {
+      if (!records || records.length === 0) return `最近${hours}小时没有手机活动记录。`;
+      const tz = resolveTimeZone();
+      const appSessions = {};
+      for (const r of records) {
+        const appName = r.app_name && r.app_name !== "EMPTY" ? r.app_name : null;
+        if (!appName) continue;
+        if (!appSessions[appName]) appSessions[appName] = { firstSeen: r.opened_at, lastSeen: r.opened_at, count: 0 };
+        appSessions[appName].count++;
+        if (new Date(r.opened_at) < new Date(appSessions[appName].firstSeen)) appSessions[appName].firstSeen = r.opened_at;
+        if (new Date(r.opened_at) > new Date(appSessions[appName].lastSeen)) appSessions[appName].lastSeen = r.opened_at;
+      }
+      const sorted = Object.entries(appSessions).sort((a, b) => b[1].count - a[1].count);
+      const lines = sorted.map(([appName, info]) => {
+        const time = formatDateTimeInTimeZone(new Date(info.firstSeen), tz).slice(-5);
+        const durationMin = Math.max(1, Math.round((new Date(info.lastSeen) - new Date(info.firstSeen)) / 60000));
+        return `${time} ${appName} ${durationMin}min (${info.count}次)`;
+      });
+      const lastActive = records[0];
+      const lastMin = Math.floor((Date.now() - new Date(lastActive.opened_at)) / 60000);
+      const lastStr = lastMin < 1 ? "刚刚" : `${lastMin}分钟前`;
+      return `最近${hours}小时手机活动：\n${lines.join("\n")}\n最后活跃：${lastStr}`;
+    });
+  }
+
+  return `未知工具: ${name}`;
+}
+
+app.post("/mcp", async (req, reply) => {
+  const { jsonrpc, id, method, params } = req.body || {};
+  if (jsonrpc !== "2.0") {
+    return reply.code(400).send({ jsonrpc: "2.0", id, error: { code: -32600, message: "Invalid Request" } });
+  }
+
+  if (method === "initialize") {
+    return reply.send({
+      jsonrpc: "2.0", id,
+      result: {
+        protocolVersion: "2024-11-05",
+        capabilities: { tools: {} },
+        serverInfo: { name: "dylan-heartbeat", version: "1.0.0" }
+      }
+    });
+  }
+
+  if (method === "notifications/initialized") {
+    return reply.send({ jsonrpc: "2.0", id, result: {} });
+  }
+
+  if (method === "tools/list") {
+    return reply.send({ jsonrpc: "2.0", id, result: { tools: MCP_TOOLS } });
+  }
+
+  if (method === "tools/call") {
+    const { name, arguments: args } = params || {};
+    try {
+      const result = await handleMcpToolCall(name, args);
+      return reply.send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: String(result) }] } });
+    } catch (err) {
+      return reply.send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: `错误: ${err.message}` }], isError: true } });
+    }
+  }
+
+  return reply.send({ jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } });
+});
+
+// ========================
+// Supabase 手机活动查询（用于聊天摘要注入）
+// ========================
 
 async function fetchRecentPhoneActivity(sinceTime) {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return [];
