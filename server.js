@@ -798,18 +798,12 @@ app.post("/v1/chat/completions", async (req, reply) => {
     const { messages: _m, ...bodyParams } = body;
     console.log(JSON.stringify({ event: "llm_forward_params", params: Object.keys(bodyParams), model: bodyParams.model, max_tokens: bodyParams.max_tokens, thinking: bodyParams.thinking, reasoning: bodyParams.reasoning }));
 
-    // 如果 Kelivo 没传 thinking 参数，为 Anthropic 模型补上默认值
-    // 如果 budget_tokens 无效（如 -1），只保留 type: enabled 让上游自动分配
+    // 如果 Kelivo 传的 thinking.budget_tokens 无效（如 -1），直接移除 thinking 让上游按默认处理
     const modelStr = (body.model || "").toLowerCase();
     const isAnthropicModel = modelStr.includes("anthropic") || modelStr.includes("claude");
-    const hasThinkingParams = body.thinking || body.reasoning || body.reasoning_effort;
-    let thinkingDefaults = {};
-    if (isAnthropicModel) {
-      if (!hasThinkingParams) {
-        thinkingDefaults = { thinking: { type: "enabled" } };
-      } else if (body.thinking && body.thinking.budget_tokens && body.thinking.budget_tokens < 1024) {
-        thinkingDefaults = { thinking: { type: "enabled" } };
-      }
+    let forwardBody = { ...body, messages: llmMessages };
+    if (isAnthropicModel && forwardBody.thinking && forwardBody.thinking.budget_tokens < 1024) {
+      delete forwardBody.thinking;
     }
 
     // 请求模型
@@ -824,7 +818,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.TARGET_API_KEY}`
       },
-      body: JSON.stringify({ ...body, ...thinkingDefaults, messages: llmMessages })
+      body: JSON.stringify(forwardBody)
     });
 
     const upstreamContentType = response.headers.get("content-type") || "";
