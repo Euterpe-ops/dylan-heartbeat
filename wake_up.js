@@ -499,9 +499,15 @@ async function runWakeUp() {
   const messages = loadTimelineMessages();
   let lastUserTime = messages ? getLastUserTime(messages) : null;
 
-  // 如果有 Supabase 数据，用最新的手机活动时间作为"用户活跃时间"
+  // 如果没有 enhanced_messages.json，用 Supabase 中 Kelivo 的最后活动时间
   if (!lastUserTime && phoneActivity && phoneActivity.length > 0) {
-    lastUserTime = new Date(phoneActivity[0].opened_at);
+    const lastKelivo = phoneActivity.find(r => r.app_name === "Kelivo");
+    if (lastKelivo) {
+      lastUserTime = new Date(lastKelivo.opened_at);
+      console.log(`使用 Supabase Kelivo 记录作为最后聊天时间: ${lastUserTime.toISOString()}`);
+    } else {
+      lastUserTime = new Date(phoneActivity[0].opened_at);
+    }
   }
 
   // 如果两者都没有，使用默认值（假设用户已沉默超过唤醒阈值）
