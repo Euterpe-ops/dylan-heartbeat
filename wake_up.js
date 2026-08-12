@@ -611,6 +611,17 @@ async function runWakeUp() {
   console.log("\nWake Result Summary:\n");
   console.log(JSON.stringify({ choices: Array.isArray(data.choices) ? data.choices.length : 0, ai_text_chars: rawAiText.length }));
 
+  // 上报 token 用量到 Gateway
+  if (data.usage) {
+    try {
+      await fetch(`${GATEWAY_BASE_URL}/internal/wake-stats`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ usage: data.usage })
+      });
+    } catch {}
+  }
+
   const diaryResult = extractDiaryFromResponse(rawAiText);
   const diarySaved = appendDiaryEntry(diaryResult.diaryContent);
   const aiText = diaryResult.remainingText;

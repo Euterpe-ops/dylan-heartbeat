@@ -622,6 +622,7 @@ function stripPosition(messages) {
 }
 
 let wakeUpLastHeartbeat = null;
+let wakeTokenStats = { totalPrompt: 0, totalCompletion: 0, callCount: 0, lastCall: null };
 
 // ========================
 // 预设方案
@@ -1591,6 +1592,7 @@ const html = `<!DOCTYPE html>
     <div class="status">
       <p>Gateway <strong>运行中 (${serverUptime}秒)</strong></p>
       <p>Auto Wakeup <strong>${wakeUpStatus}</strong></p>
+      <p>Token 用量 <strong>${wakeTokenStats.callCount > 0 ? `${wakeTokenStats.callCount} 次调用 · ${wakeTokenStats.totalPrompt + wakeTokenStats.totalCompletion} tokens（↑${wakeTokenStats.totalPrompt} ↓${wakeTokenStats.totalCompletion}）` : '本次部署暂无调用'}</strong></p>
     </div>
     ${runtimeConfigNotice}
 
@@ -1945,6 +1947,24 @@ app.post("/admin/presets/delete", { preHandler: basicAuth }, async (req, reply) 
 app.post("/internal/heartbeat", async (req, reply) => {
   wakeUpLastHeartbeat = Date.now();
   reply.send({ status: "ok" });
+});
+
+// ========================
+// Token 用量上报
+// ========================
+app.post("/internal/wake-stats", async (req, reply) => {
+  const { usage } = req.body || {};
+  if (usage) {
+    wakeTokenStats.totalPrompt += (usage.prompt_tokens || 0);
+    wakeTokenStats.totalCompletion += (usage.completion_tokens || 0);
+    wakeTokenStats.callCount += 1;
+    wakeTokenStats.lastCall = Date.now();
+  }
+  reply.send({ status: "ok" });
+});
+
+app.get("/internal/wake-stats", async (req, reply) => {
+  reply.send(wakeTokenStats);
 });
 
 // ========================
