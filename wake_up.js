@@ -459,7 +459,13 @@ function formatPhoneActivityContext(records) {
   for (const [appName, info] of sorted) {
     const lastTime = new Date(info.lastActivity);
     const diffMin = Math.floor((now - lastTime) / 1000 / 60);
-    const timeStr = diffMin < 1 ? "刚刚" : diffMin < 60 ? `${diffMin}分钟前` : `${Math.floor(diffMin / 60)}小时前`;
+    const lastStr = diffMin < 1 ? "刚刚" : diffMin < 60 ? `${diffMin}分钟前` : `${Math.floor(diffMin / 60)}小时前`;
+
+    const firstOpen = info.opens.length > 0 ? info.opens[0] : null;
+    const firstDiffMin = firstOpen ? Math.floor((now - firstOpen) / 1000 / 60) : null;
+    const firstStr = firstDiffMin != null
+      ? (firstDiffMin < 1 ? "刚刚" : firstDiffMin < 60 ? `${firstDiffMin}分钟前` : `${Math.floor(firstDiffMin / 60)}小时前`)
+      : null;
 
     let durationStr = "";
     if (info.opens.length > 0 && info.closes.length > 0) {
@@ -474,10 +480,12 @@ function formatPhoneActivityContext(records) {
     }
 
     const openCount = info.opens.length;
-    const isCurrentlyOpen = info.opens.length > info.closes.length;
-    const status = isCurrentlyOpen ? "（当前在用）" : "";
 
-    lines.push(`- ${appName}：打开${openCount}次${durationStr}，最近${timeStr}${status}`);
+    if (firstStr && firstStr !== lastStr) {
+      lines.push(`- ${appName}：${firstStr}开始使用，最后活动${lastStr}，打开${openCount}次${durationStr}`);
+    } else {
+      lines.push(`- ${appName}：最近${lastStr}，打开${openCount}次${durationStr}`);
+    }
   }
 
   const latestRecord = new Date(records[0].opened_at);

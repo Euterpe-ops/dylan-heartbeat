@@ -35,7 +35,11 @@ function getDatePartsInTimeZone(date = new Date(), timeZone = resolveTimeZone())
 
 function formatDateTimeInTimeZone(date = new Date(), timeZone = resolveTimeZone()) {
   const parts = getDatePartsInTimeZone(date, timeZone);
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+  const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  const dayOfWeek = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" }).format(date);
+  const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const weekday = weekdays[weekdayMap[dayOfWeek] ?? date.getDay()];
+  return `${parts.year}-${parts.month}-${parts.day} ${weekday} ${parts.hour}:${parts.minute}`;
 }
 
 function getHourInTimeZone(date = new Date(), timeZone = resolveTimeZone()) {
