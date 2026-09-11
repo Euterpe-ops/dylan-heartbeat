@@ -1,0 +1,4 @@
+project_id = "dylan-heartbeat"
+
+[functions.heartbeat]
+verify_jwt = true

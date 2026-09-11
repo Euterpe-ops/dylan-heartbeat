@@ -501,6 +501,19 @@ http://localhost:3000/test-bark
 
 ## 🐧 跨平台与云部署
 
+### Supabase Edge Function（无需常驻服务器）
+
+如果只需要自动唤醒和 Bark 推送，可以把唤醒任务部署为 Supabase Edge Function，
+由 Supabase Cron 定时触发。函数执行完成后会自动释放，不需要 Railway 这类常驻容器。
+
+本仓库已包含 Edge Function、数据库迁移和每 30 分钟一次的 Cron 示例，详见
+[`SUPABASE_EDGE.md`](SUPABASE_EDGE.md)。
+
+从 Railway 迁移到 Supabase 的原因、最终配置、差异和回退方式见
+[`MIGRATION_RAILWAY_TO_SUPABASE.md`](MIGRATION_RAILWAY_TO_SUPABASE.md)。
+
+注意：这个模式只替代自动唤醒和推送，不替代 `/v1` 网关、`/mcp` 工具接口和 `/admin` 管理页。
+
 ### 在 Windows 上运行
 
 1. 安装 [Node.js](https://nodejs.org/)（v26+），并确保 `npm` 可用

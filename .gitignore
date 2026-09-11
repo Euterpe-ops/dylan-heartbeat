@@ -7,3 +7,5 @@ enhanced_messages.json*
 .DS_Store
 presets.json
 diary/
+.supabase/
+supabase/.temp/
