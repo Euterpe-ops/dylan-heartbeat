@@ -21,8 +21,8 @@ select vault.create_secret(
 );
 
 select cron.schedule(
-  'dylan-heartbeat-every-30-minutes',
-  '*/30 * * * *',
+  'dylan-heartbeat-every-10-minutes',
+  '*/10 * * * *',
   $$
     select net.http_post(
       url := (
@@ -53,4 +53,4 @@ select cron.schedule(
 );
 
 -- To remove the schedule later:
--- select cron.unschedule('dylan-heartbeat-every-30-minutes');
+-- select cron.unschedule('dylan-heartbeat-every-10-minutes');

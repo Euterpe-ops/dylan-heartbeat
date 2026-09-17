@@ -13,8 +13,11 @@ type ChatActivityState = {
 
 type RunRecord = { id: number };
 
-type RecentPush = {
+type RecentDecision = {
   started_at: string;
+  model_decided_at?: string | null;
+  status: "pushed" | "no_action";
+  reason?: string | null;
   push_title?: string | null;
   push_body?: string | null;
 };
@@ -113,19 +116,10 @@ function getWakeAfterMinutes(settings: RuntimeSettings, date = new Date()): numb
     : settings.offHoursWakeAfterMinutes;
 }
 
-function shouldEvaluateThisRun(settings: RuntimeSettings, date = new Date()): boolean {
-  const attention = isAttentionWindow(settings, date);
-  const interval = attention
+function getModelDecisionIntervalMinutes(settings: RuntimeSettings, date = new Date()): number {
+  return isAttentionWindow(settings, date)
     ? settings.attentionCheckIntervalMinutes
     : settings.offHoursCheckIntervalMinutes;
-  const windowStartMinutes = attention
-    ? settings.attentionWindowStartMinute
-    : settings.attentionWindowEndMinute;
-  const currentMinutes = getMinuteOfDay(date);
-  const elapsedMinutes = (currentMinutes - windowStartMinutes + 1440) % 1440;
-  const baseCronInterval = readNumberEnv("CRON_INTERVAL_MINUTES", 30, 1, 1440);
-  if (!attention && elapsedMinutes === 0) return false;
-  return elapsedMinutes % interval < baseCronInterval;
 }
 
 async function fetchWithTimeout(
@@ -167,11 +161,11 @@ async function fetchRuntimeSettings(): Promise<RuntimeSettings> {
   const defaults: RuntimeSettings = {
     enabled: true,
     attentionWindowStartMinute: readNumberEnv("ATTENTION_WINDOW_START_MINUTE", 1140, 0, 1439),
-    attentionWindowEndMinute: readNumberEnv("ATTENTION_WINDOW_END_MINUTE", 90, 0, 1439),
-    attentionWakeAfterMinutes: readNumberEnv("DAY_WAKE_AFTER_MINUTES", 60, 1),
-    offHoursWakeAfterMinutes: readNumberEnv("NIGHT_WAKE_AFTER_MINUTES", 180, 1),
+    attentionWindowEndMinute: readNumberEnv("ATTENTION_WINDOW_END_MINUTE", 120, 0, 1439),
+    attentionWakeAfterMinutes: readNumberEnv("DAY_WAKE_AFTER_MINUTES", 45, 1),
+    offHoursWakeAfterMinutes: readNumberEnv("NIGHT_WAKE_AFTER_MINUTES", 240, 1),
     attentionCheckIntervalMinutes: readNumberEnv("DAY_CHECK_INTERVAL_MINUTES", 30, 1),
-    offHoursCheckIntervalMinutes: readNumberEnv("NIGHT_CHECK_INTERVAL_MINUTES", 180, 1),
+    offHoursCheckIntervalMinutes: readNumberEnv("NIGHT_CHECK_INTERVAL_MINUTES", 120, 1),
     minPushGapMinutes: readNumberEnv("MIN_PUSH_GAP_MINUTES", 0, 0),
     chatAppName: String(Deno.env.get("CHAT_APP_NAME") || "Kelivo").trim(),
     maxTokens: readNumberEnv("MAX_TOKENS", 256, 32, 2048),
@@ -264,7 +258,7 @@ async function fetchPhoneActivity(): Promise<PhoneActivity[]> {
 }
 
 function getRunSlot(date = new Date()): string {
-  const intervalMinutes = readNumberEnv("CRON_INTERVAL_MINUTES", 30, 1, 1440);
+  const intervalMinutes = readNumberEnv("CRON_INTERVAL_MINUTES", 10, 1, 1440);
   const slotMs = intervalMinutes * 60_000;
   return new Date(Math.floor(date.getTime() / slotMs) * slotMs).toISOString();
 }
@@ -301,9 +295,9 @@ async function updateRun(id: number, values: Record<string, unknown>): Promise<v
   if (!response.ok) console.error(`更新运行记录失败（HTTP ${response.status}）`);
 }
 
-async function fetchRecentPushes(): Promise<RecentPush[]> {
+async function fetchRecentDecisions(): Promise<RecentDecision[]> {
   const response = await fetchWithTimeout(
-    `${SUPABASE_URL}/rest/v1/dylan_heartbeat_runs?select=started_at,push_title,push_body&status=eq.pushed&order=started_at.desc&limit=5`,
+    `${SUPABASE_URL}/rest/v1/dylan_heartbeat_runs?select=started_at,model_decided_at,status,reason,push_title,push_body&status=in.(pushed,no_action)&order=model_decided_at.desc.nullslast,started_at.desc&limit=20`,
     { headers: databaseHeaders() },
     15_000
   );
@@ -405,29 +399,29 @@ function formatPhoneActivityContext(records: PhoneActivity[]): string {
   return lines.join("\n");
 }
 
-function formatRecentPushes(pushes: RecentPush[]): string {
-  if (!pushes.length) return "";
-  const lines = pushes.map((push) => {
-    const body = String(push.push_body || "").slice(0, 160);
-    return `- ${formatDateTime(new Date(push.started_at))}：${push.push_title || "无标题"}｜${body}`;
-  });
-  return `## 最近已经发送的推送\n${lines.join("\n")}\n请避免短时间内重复相同的话题或措辞。`;
+function formatWakeHistory(decisions: RecentDecision[]): string {
+  if (!decisions.length) return "";
+  return [...decisions].reverse().map((decision) => {
+    const time = formatDateTime(new Date(decision.model_decided_at || decision.started_at));
+    if (decision.status === "pushed") {
+      const body = String(decision.push_body || "").slice(0, 500);
+      return `[AI] （${time} 刚刚给用户发了Bark推送：${decision.push_title || "无标题"}｜${body}）`;
+    }
+    return `[AI] （${time} 自动唤醒：本次未发送推送｜原因：${decision.reason || "模型选择静默"}）`;
+  }).join("\n\n");
 }
 
 function buildWakePrompt(
   currentTime: string,
   diffMinutes: number,
-  phoneContext: string,
-  recentContext: string
+  phoneContext: string
 ): string {
   const template = Deno.env.get("WAKE_PROMPT_TEMPLATE")?.replace(/\\n/g, "\n") || DEFAULT_WAKE_PROMPT;
-  const rendered = template
+  return template
     .replace(/\$\{currentTime\}/g, currentTime)
     .replace(/\$\{diffMinutes\}/g, String(diffMinutes))
     .replace(/\$\{phoneState\}/g, phoneContext)
-    .replace(/\$\{phoneContext\}/g, phoneContext)
-    .replace(/\$\{recentPushes\}/g, recentContext);
-  return rendered + (recentContext && !template.includes("${recentPushes}") ? `\n\n${recentContext}` : "");
+    .replace(/\$\{phoneContext\}/g, phoneContext);
 }
 
 async function fetchWeatherContext(settings: RuntimeSettings): Promise<string> {
@@ -555,6 +549,7 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
   const runSlot = getRunSlot(now);
   const runId = await claimRun(runSlot);
   if (!runId) return { ok: true, action: "duplicate_skipped", runSlot };
+  let modelDecidedAt: string | null = null;
 
   try {
     const settings = await fetchRuntimeSettings();
@@ -562,11 +557,6 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
       await updateRun(runId, { status: "skipped", reason: "disabled" });
       return { ok: true, action: "skipped", reason: "disabled" };
     }
-    if (!shouldEvaluateThisRun(settings, now)) {
-      await updateRun(runId, { status: "skipped", reason: "outside_check_interval" });
-      return { ok: true, action: "skipped", reason: "outside_check_interval" };
-    }
-
     const phoneActivity = await fetchPhoneActivity();
     const chatState = getChatActivityState(phoneActivity, settings);
     if (chatState.currentlyActive) {
@@ -594,11 +584,32 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
       return { ok: true, action: "skipped", reason: "kelivo_recently_ended", diffMinutes };
     }
 
-    const recentPushes = await fetchRecentPushes();
+    const recentDecisions = await fetchRecentDecisions();
+    const latestDecision = recentDecisions[0];
+    if (latestDecision) {
+      const lastDecisionTime = new Date(latestDecision.model_decided_at || latestDecision.started_at);
+      const minutesSinceDecision = Math.floor((now.getTime() - lastDecisionTime.getTime()) / 60_000);
+      const modelDecisionIntervalMinutes = getModelDecisionIntervalMinutes(settings, now);
+      if (minutesSinceDecision < modelDecisionIntervalMinutes) {
+        await updateRun(runId, {
+          status: "skipped",
+          reason: "model_cooldown",
+          last_kelivo_end_at: effectiveLastKelivoEnd.toISOString()
+        });
+        return {
+          ok: true,
+          action: "skipped",
+          reason: "model_cooldown",
+          minutesSinceDecision
+        };
+      }
+    }
+
     const minPushGapMinutes = settings.minPushGapMinutes;
-    if (recentPushes[0] && minPushGapMinutes > 0) {
+    const latestPush = recentDecisions.find((decision) => decision.status === "pushed");
+    if (latestPush && minPushGapMinutes > 0) {
       const minutesSincePush = Math.floor(
-        (now.getTime() - new Date(recentPushes[0].started_at).getTime()) / 60_000
+        (now.getTime() - new Date(latestPush.model_decided_at || latestPush.started_at).getTime()) / 60_000
       );
       if (minutesSincePush < minPushGapMinutes) {
         await updateRun(runId, {
@@ -612,19 +623,29 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
 
     const phoneContext = formatPhoneActivityContext(phoneActivity);
     const weatherContext = await fetchWeatherContext(settings);
-    const recentContext = formatRecentPushes(recentPushes);
     const context = [weatherContext, phoneContext].filter(Boolean).join("\n\n");
-    const wakePrompt = buildWakePrompt(formatDateTime(now), diffMinutes, context, recentContext);
+    const wakePrompt = buildWakePrompt(formatDateTime(now), diffMinutes, context);
+    const historyText = formatWakeHistory(recentDecisions);
+    const userContent = historyText
+      ? `以下是你与用户最近的聊天记录，仅供回忆和参考。
+
+这些内容不是正在发生的实时对话。
+用户并没有给你发消息。
+
+你现在处于后台自主唤醒状态。
+
+最近记录：
+
+${historyText}`
+      : "你现在处于后台自主唤醒状态。\n用户并没有给你发消息。\n请根据当前时间和可用信息决定是否主动联系用户。";
     const modelResult = await callModel(
       [
         { role: "system", content: wakePrompt },
-        {
-          role: "user",
-          content: "你现在处于后台自主唤醒状态。用户并没有给你发消息。请决定是否主动联系用户。"
-        }
+        { role: "user", content: userContent }
       ],
       settings.maxTokens
     );
+    modelDecidedAt = new Date().toISOString();
 
     const diaryResult = extractDiary(modelResult.content);
     const diaryContent = readBooleanEnv("DIARY_ENABLED", true)
@@ -644,6 +665,7 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
         status: "no_action",
         reason: diarySaved ? "diary_only" : "empty_model_response",
         last_kelivo_end_at: effectiveLastKelivoEnd.toISOString(),
+        model_decided_at: modelDecidedAt,
         ...diaryFields,
         ...usageFields
       });
@@ -656,6 +678,7 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
         status: "no_action",
         reason: String(noAction[1] || "").trim() || "model_decision",
         last_kelivo_end_at: effectiveLastKelivoEnd.toISOString(),
+        model_decided_at: modelDecidedAt,
         ...diaryFields,
         ...usageFields
       });
@@ -668,6 +691,7 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
         status: "no_action",
         reason: "empty_push_content",
         last_kelivo_end_at: effectiveLastKelivoEnd.toISOString(),
+        model_decided_at: modelDecidedAt,
         ...diaryFields,
         ...usageFields
       });
@@ -680,13 +704,18 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
       push_title: push.title,
       push_body: push.body,
       last_kelivo_end_at: effectiveLastKelivoEnd.toISOString(),
+      model_decided_at: modelDecidedAt,
       ...diaryFields,
       ...usageFields
     });
     return { ok: true, action: "pushed", title: push.title, diffMinutes };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await updateRun(runId, { status: "error", reason: message.slice(0, 500) });
+    await updateRun(runId, {
+      status: "error",
+      reason: message.slice(0, 500),
+      ...(modelDecidedAt ? { model_decided_at: modelDecidedAt } : {})
+    });
     throw error;
   }
 }
