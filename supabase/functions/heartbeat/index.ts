@@ -244,7 +244,7 @@ async function fetchRuntimeSettings(): Promise<RuntimeSettings> {
   };
 }
 
-async function fetchPhoneActivity(): Promise<PhoneActivity[]> {
+async function fetchPhoneActivity(chatAppName: string): Promise<PhoneActivity[]> {
   const response = await fetchWithTimeout(
     `${SUPABASE_URL}/rest/v1/phone_activity?select=app_name,action,opened_at&order=opened_at.desc&limit=100`,
     { headers: databaseHeaders() },
@@ -254,7 +254,46 @@ async function fetchPhoneActivity(): Promise<PhoneActivity[]> {
     throw new Error(`Supabase phone_activity 查询失败（HTTP ${response.status}）`);
   }
   const records = await response.json();
-  return Array.isArray(records) ? records : [];
+  const recentRecords: PhoneActivity[] = Array.isArray(records) ? records : [];
+  const normalizedChatAppName = chatAppName.trim();
+  if (!normalizedChatAppName) return recentRecords;
+
+  // The general activity feed can be very busy, so the last Kelivo session may
+  // fall outside the latest 100 rows. Fetch its last named event separately,
+  // plus the immediately following event (blank close rows identify the app
+  // through the preceding open event).
+  const chatResponse = await fetchWithTimeout(
+    `${SUPABASE_URL}/rest/v1/phone_activity?select=app_name,action,opened_at&app_name=ilike.${encodeURIComponent(normalizedChatAppName)}&order=opened_at.desc&limit=1`,
+    { headers: databaseHeaders() },
+    15_000
+  );
+  if (!chatResponse.ok) {
+    throw new Error(`Supabase Kelivo 活动查询失败（HTTP ${chatResponse.status}）`);
+  }
+  const chatRows = await chatResponse.json();
+  const lastChatRecord: PhoneActivity | undefined = Array.isArray(chatRows) ? chatRows[0] : undefined;
+  if (!lastChatRecord?.opened_at) return recentRecords;
+
+  const followingResponse = await fetchWithTimeout(
+    `${SUPABASE_URL}/rest/v1/phone_activity?select=app_name,action,opened_at&opened_at=gt.${encodeURIComponent(lastChatRecord.opened_at)}&order=opened_at.asc&limit=1`,
+    { headers: databaseHeaders() },
+    15_000
+  );
+  if (!followingResponse.ok) {
+    throw new Error(`Supabase Kelivo 后续活动查询失败（HTTP ${followingResponse.status}）`);
+  }
+  const followingRows = await followingResponse.json();
+  const anchorRecords: PhoneActivity[] = [
+    lastChatRecord,
+    ...(Array.isArray(followingRows) ? followingRows : [])
+  ];
+  const seen = new Set<string>();
+  return [...recentRecords, ...anchorRecords].filter((record) => {
+    const key = `${record.opened_at}\u0000${record.action}\u0000${record.app_name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function getRunSlot(date = new Date()): string {
@@ -557,7 +596,7 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
       await updateRun(runId, { status: "skipped", reason: "disabled" });
       return { ok: true, action: "skipped", reason: "disabled" };
     }
-    const phoneActivity = await fetchPhoneActivity();
+    const phoneActivity = await fetchPhoneActivity(settings.chatAppName);
     const chatState = getChatActivityState(phoneActivity, settings);
     if (chatState.currentlyActive) {
       await updateRun(runId, { status: "skipped", reason: "kelivo_currently_active" });
