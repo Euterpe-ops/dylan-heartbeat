@@ -666,14 +666,16 @@ async function handleHeartbeat(): Promise<Record<string, unknown>> {
     const wakePrompt = buildWakePrompt(formatDateTime(now), diffMinutes, context);
     const historyText = formatWakeHistory(recentDecisions);
     const userContent = historyText
-      ? `以下是你与用户最近的聊天记录，仅供回忆和参考。
+      ? `以下只是你之前的自动唤醒判断和已发送推送，用于避免重复推送、保持语气连续。
 
-这些内容不是正在发生的实时对话。
-用户并没有给你发消息。
+它们不是你与用户的聊天记录，不包含用户在 Kelivo 中与你的真实对话。
+旧推送中的时间间隔和“多久没来找你”等说法已经过期，不能当作当前事实。
+判断用户多久没来找你时，只能使用 system message 中本次实时提供的 Kelivo 分钟数。
 
 你现在处于后台自主唤醒状态。
+用户此刻并没有给你发消息。
 
-最近记录：
+最近自动唤醒记录：
 
 ${historyText}`
       : "你现在处于后台自主唤醒状态。\n用户并没有给你发消息。\n请根据当前时间和可用信息决定是否主动联系用户。";
